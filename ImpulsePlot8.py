@@ -273,7 +273,7 @@ try:
                 logging.warning(f"⚠️ Runtime error: {e}")
                 plt.pause(0.005)
         else:
-            plt.pause(0.05)
+            plt.pause(0.001)
 
 except KeyboardInterrupt:
     print("Interrupted.")
