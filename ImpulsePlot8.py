@@ -8,7 +8,7 @@ import time
 # === CONFIG ===
 PORT = 'COM7'
 BAUDRATE = 115200
-SAMPLE_RATE = 100
+SAMPLE_RATE = 500
 WINDOW_SECONDS = 4
 BUFFER_SIZE = SAMPLE_RATE * WINDOW_SECONDS
 PLOT_EVERY = 1
@@ -19,7 +19,7 @@ y_range = 2.0
 
 # === STATE ===
 running = True
-log_enabled = True
+log_enabled = False         # ✅ Logging toggle state
 trigger_active = True
 fft_enabled = False            # ✅ FFT toggle state
 start_time = datetime.now()
@@ -271,7 +271,7 @@ try:
 
             except Exception as e:
                 logging.warning(f"⚠️ Runtime error: {e}")
-                plt.pause(0.05)
+                plt.pause(0.005)
         else:
             plt.pause(0.05)
 

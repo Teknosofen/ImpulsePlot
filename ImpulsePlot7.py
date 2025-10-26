@@ -259,6 +259,7 @@ try:
 
                 plt.pause(0.001)
 
+
             except Exception as e:
                 logging.warning(f"⚠️ Runtime error: {e}")
                 plt.pause(0.05)
