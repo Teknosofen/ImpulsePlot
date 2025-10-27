@@ -6,23 +6,23 @@ from datetime import datetime
 import time
 
 # === CONFIG ===
-PORT = 'COM4'
+PORT = 'COM4'          # your serial port
 BAUDRATE = 115200
-SAMPLE_RATE = 500
+SAMPLE_RATE = 500       # Hz (update from 100 to 500)
 WINDOW_SECONDS = 4
 BUFFER_SIZE = SAMPLE_RATE * WINDOW_SECONDS
-PLOT_EVERY = 1
 FFT_WINDOW_SAMPLES = 1000
-
+PLOT_EVERY = 1
 TRIGGER_THRESHOLD = 2.5
 y_range = 2.0
 
 # === STATE ===
 running = True
-log_enabled = False         # ✅ Logging toggle state
+log_enabled = True
 trigger_active = True
-fft_enabled = False            # ✅ FFT toggle state
+fft_enabled = False
 start_time = datetime.now()
+fft_window_type = 'hann'   # default
 
 # === FILES ===
 LOG_FILENAME = "accel_log.csv"
@@ -74,30 +74,28 @@ def csv_writer():
 
 threading.Thread(target=csv_writer, daemon=True).start()
 
-# === PLOT SETUP ===
+# === PLOT SETUP (combined) ===
 plt.ion()
-fig, ax_time = plt.subplots(1, 1, figsize=(10, 6))
+fig, (ax_time, ax_fft) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [2, 1]})
 line_x, = ax_time.plot([], [], label='X')
 line_y, = ax_time.plot([], [], label='Y')
 line_z, = ax_time.plot([], [], label='Z')
-ax_time.legend()
+ax_time.legend(loc='upper right')
 ax_time.set_xlabel('Time (s)')
 ax_time.set_ylabel('Acceleration (g)')
 ax_time.set_ylim(-y_range, y_range)
 ax_time.set_xlim(0, WINDOW_SECONDS)
 
-# FFT figure (hidden by default)
-fig_fft, ax_fft = plt.subplots(1, 1, figsize=(10, 4))
-fft_line_x, = ax_fft.plot([], [], label='X')
-fft_line_y, = ax_fft.plot([], [], label='Y')
-fft_line_z, = ax_fft.plot([], [], label='Z')
-ax_fft.set_title('FFT of Acceleration (Last 1000 samples)')
+fft_line_x, = ax_fft.plot([], [], label='X (FFT)')
+fft_line_y, = ax_fft.plot([], [], label='Y (FFT)')
+fft_line_z, = ax_fft.plot([], [], label='Z (FFT)')
+ax_fft.legend(loc='upper right')
 ax_fft.set_xlabel('Frequency (Hz)')
 ax_fft.set_ylabel('Amplitude')
-ax_fft.legend()
-fig_fft.canvas.manager.window.withdraw()  # start hidden
+ax_fft.set_visible(False)
+fig.tight_layout()
+fig.canvas.draw_idle()
 
-# === HELP TEXT ===
 help_text = (
     "Controls:\n"
     "  SPACE → Run/Pause\n"
@@ -106,16 +104,15 @@ help_text = (
     "  L     → Toggle logging\n"
     "  T     → Toggle trigger\n"
     "  F     → Toggle FFT display\n"
+    "  W     → Cycle FFT window type\n"
+    "  I / D → Increase / Decrease FFT window length\n"
     "  ESC   → Quit"
 )
 ax_time.text(0.01, 0.95, help_text, transform=ax_time.transAxes,
              fontsize=10, verticalalignment='top',
              bbox=dict(facecolor='white', alpha=0.7))
 
-plot_counter = 0
-samples_since_fft = 0
-
-# === TRIGGER ACTION ===
+# === TRIGGER ===
 def trigger_action(t, x, y, z):
     magnitude = (x**2 + y**2 + z**2)**0.5
     if magnitude > TRIGGER_THRESHOLD:
@@ -125,11 +122,23 @@ def trigger_action(t, x, y, z):
                 writer = csv.writer(f)
                 writer.writerow([f"{t:.3f}", f"{x:.3f}", f"{y:.3f}", f"{z:.3f}", f"{magnitude:.3f}"])
 
+# === FFT WINDOW FUNCTION ===
+def get_fft_window(n, kind='hann'):
+    if kind == 'hann':
+        return np.hanning(n)
+    elif kind == 'hamming':
+        return np.hamming(n)
+    elif kind == 'blackman':
+        return np.blackman(n)
+    else:  # rectangular
+        return np.ones(n)
+
 # === KEYBOARD HANDLER ===
 def on_key(event):
     global running, y_range, WINDOW_SECONDS, BUFFER_SIZE
     global time_buffer, x_buffer, y_buffer, z_buffer, arrival_times
     global log_enabled, trigger_active, fft_enabled, start_time
+    global fft_window_type, FFT_WINDOW_SAMPLES
 
     if event.key == ' ':
         running = not running
@@ -182,39 +191,45 @@ def on_key(event):
 
     elif event.key == 'f':
         fft_enabled = not fft_enabled
-        if fft_enabled:
-            fig_fft.canvas.manager.window.deiconify()  # show
-            print("📊 FFT display enabled")
-        else:
-            fig_fft.canvas.manager.window.withdraw()    # hide
-            print("📊 FFT display disabled")
+        ax_fft.set_visible(fft_enabled)
+        fig.tight_layout()
+        fig.canvas.draw_idle()
+        print(f"📊 FFT display {'enabled' if fft_enabled else 'disabled'}")
+
+    elif event.key == 'w':
+        windows = ['hann', 'hamming', 'blackman', 'rect']
+        idx = windows.index(fft_window_type)
+        fft_window_type = windows[(idx + 1) % len(windows)]
+        print(f"🎚️ FFT window set to: {fft_window_type}")
+
+    elif event.key == 'i':
+        FFT_WINDOW_SAMPLES = min(BUFFER_SIZE, int(FFT_WINDOW_SAMPLES * 1.25))
+        print(f"📈 FFT window length increased: {FFT_WINDOW_SAMPLES} samples")
+
+    elif event.key == 'd':
+        FFT_WINDOW_SAMPLES = max(100, int(FFT_WINDOW_SAMPLES * 0.8))
+        print(f"📉 FFT window length decreased: {FFT_WINDOW_SAMPLES} samples")
 
     elif event.key == 'escape':
         print("🛑 Exiting...")
         plt.close(fig)
-        plt.close(fig_fft)
 
 fig.canvas.mpl_connect('key_press_event', on_key)
 
-# === MAIN LOOP (revised) ===
+# === MAIN LOOP ===
 try:
     while plt.get_fignums():
         if running:
             try:
                 new_samples = 0
-
                 while not data_queue.empty():
                     x_val, y_val, z_val = data_queue.get()
-                    
-                    # Compute timestamp based on last sample and SAMPLE_RATE
                     if len(time_buffer) == 0:
                         t = 0.0
                     else:
                         t = time_buffer[-1] + 1.0 / SAMPLE_RATE
 
                     arrival = datetime.now().timestamp()
-
-                    # Append to buffers
                     time_buffer.append(t)
                     x_buffer.append(x_val)
                     y_buffer.append(y_val)
@@ -222,11 +237,9 @@ try:
                     arrival_times.append(arrival)
                     new_samples += 1
 
-                    # Logging
                     if log_enabled:
                         log_queue.put([f"{t:.3f}", f"{x_val:.3f}", f"{y_val:.3f}", f"{z_val:.3f}"])
 
-                    # Trigger action
                     if trigger_active:
                         trigger_action(t, x_val, y_val, z_val)
 
@@ -234,49 +247,57 @@ try:
                     plt.pause(0.001)
                     continue
 
-                # Convert buffers to numpy arrays
+                # Time plot
                 t_arr = np.array(time_buffer)
                 x_arr = np.array(x_buffer)
                 y_arr = np.array(y_buffer)
                 z_arr = np.array(z_buffer)
-
-                # === Time plot update ===
                 line_x.set_data(t_arr, x_arr)
                 line_y.set_data(t_arr, y_arr)
                 line_z.set_data(t_arr, z_arr)
                 ax_time.set_xlim(max(t_arr[-1] - WINDOW_SECONDS, 0), t_arr[-1])
                 ax_time.set_ylim(-y_range, y_range)
 
-                # === Sampling diagnostics ===
+                # Timing diagnostics
                 intervals = np.diff(np.array(arrival_times))
                 if len(intervals) > 0:
                     avg_dt = np.mean(intervals)
-                    fps = 1.0 / avg_dt if avg_dt > 0 else 0
+                    fps = 1 / avg_dt if avg_dt > 0 else 0
                     ax_time.set_title(f"Oscilloscope — Δt={avg_dt*1000:.1f} ms ({fps:.1f} Hz)")
 
-                # === FFT update if enabled ===
+                # === FFT update ===
                 if fft_enabled and len(x_buffer) >= FFT_WINDOW_SAMPLES:
                     x_win = np.array(list(x_buffer)[-FFT_WINDOW_SAMPLES:])
                     y_win = np.array(list(y_buffer)[-FFT_WINDOW_SAMPLES:])
                     z_win = np.array(list(z_buffer)[-FFT_WINDOW_SAMPLES:])
+
+                    window = get_fft_window(len(x_win), fft_window_type)
                     freqs = np.fft.rfftfreq(len(x_win), d=1/SAMPLE_RATE)
-                    fft_line_x.set_data(freqs, np.abs(np.fft.rfft(x_win)))
-                    fft_line_y.set_data(freqs, np.abs(np.fft.rfft(y_win)))
-                    fft_line_z.set_data(freqs, np.abs(np.fft.rfft(z_win)))
+                    fft_x = np.abs(np.fft.rfft(x_win * window))
+                    fft_y = np.abs(np.fft.rfft(y_win * window))
+                    fft_z = np.abs(np.fft.rfft(z_win * window))
+
+                    fft_line_x.set_data(freqs, fft_x)
+                    fft_line_y.set_data(freqs, fft_y)
+                    fft_line_z.set_data(freqs, fft_z)
                     ax_fft.set_xlim(0, SAMPLE_RATE / 2)
                     ax_fft.relim()
                     ax_fft.autoscale_view()
+
+                    # Display current FFT info
+                    ax_fft.set_title(
+                        f"FFT ({FFT_WINDOW_SAMPLES} samples, window={fft_window_type})"
+                    )
 
                 plt.pause(0.001)
 
             except Exception as e:
                 logging.warning(f"⚠️ Runtime error: {e}")
-                plt.pause(0.005)
+                plt.pause(0.05)
         else:
-            plt.pause(0.001)
+            plt.pause(0.05)
 
 except KeyboardInterrupt:
     print("Interrupted.")
 finally:
     print("🛑 Exiting.")
-
