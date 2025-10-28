@@ -72,9 +72,6 @@ show_help_overlay = True
 cmap = plt.get_cmap('tab20')
 channel_colors = [cmap(i) for i in range(20)]
 
-# serial err messaging to display
-serial_error_msg = None
-
 # ----------------------------
 # === Serial reader thread ===
 # ----------------------------
@@ -83,7 +80,6 @@ def serial_reader():
     Background thread that reads lines from serial port, parses up to MAX_CHANNELS
     floats (tab-separated), and puts tuples into data_queue.
     """
-    global serial_error_msg
     try:
         ser = serial.Serial(PORT, BAUDRATE, timeout=0.01)
         ser.reset_input_buffer()
@@ -107,9 +103,7 @@ def serial_reader():
                     # if queue is full we drop the sample
                     pass
     except Exception as e:
-       # logging.error(f"Serial thread error: {e}")
-        serial_error_msg = f"⚠️ Failed to open serial port {PORT}\n\n{e}"
-        logging.error(serial_error_msg)
+        logging.error(f"Serial thread error: {e}")
 
 # start serial thread as daemon
 threading.Thread(target=serial_reader, daemon=True).start()
@@ -179,20 +173,6 @@ help_text = (
     " Click legend entries to show/hide channels. ESC: Quit"
 )
 help_overlay.set_text(help_text)
-
-# ----------------------------
-# === Safe plotting helper ===
-# ----------------------------
-def safe_set_line_data(line, x, y):
-    """
-    Safely set line data, ensuring x and y have the same length.
-    Prevents matplotlib broadcasting errors during zoom/resizing or buffer resizes.
-    """
-    if len(x) == 0 or len(y) == 0:
-        return
-    n = min(len(x), len(y))
-    line.set_data(x[-n:], y[-n:])
-
 
 # ----------------------------
 # === Utility functions ===
@@ -350,10 +330,8 @@ def compute_and_plot_fft():
             fft_plot_vals = fft_vals
             ax_fft.set_ylabel('Amplitude (g)')
         # plot and store handle
-        # ln, = ax_fft.plot(freqs, fft_plot_vals, label=f"CH{ch+1}", color=channel_colors[ch % len(channel_colors)])
-        # fft_lines[ch] = ln
-        safe_set_line_data(fft_lines[ch], freqs, fft_plot_vals)
-
+        ln, = ax_fft.plot(freqs, fft_plot_vals, label=f"CH{ch+1}", color=channel_colors[ch % len(channel_colors)])
+        fft_lines[ch] = ln
     # set x-limits to current span (cap to Nyquist)
     ax_fft.set_xlim(0, min(fft_span, SAMPLE_RATE / 2))
     ax_fft.relim(); ax_fft.autoscale_view()
@@ -552,15 +530,6 @@ fig.canvas.mpl_connect('key_press_event', on_key)
 # ----------------------------
 try:
     while plt.get_fignums():
-        # Check if serial connection failed
-        if serial_error_msg:
-            ax_time.clear()
-            ax_time.axis("off")
-            ax_time.text(0.5, 0.5, serial_error_msg,
-                         ha="center", va="center", color="red", fontsize=12, wrap=True)
-            plt.pause(0.5)
-            continue
-
         if running:
             # pull all pending samples off the queue
             new_samples = 0
@@ -578,15 +547,11 @@ try:
             if num_channels > 0:
                 t_arr = np.array(time_buffer)
                 # update each channel's line
-                # for ch in range(num_channels):
-                #     y_arr = np.array(data_buffers[ch])
-                #     if len(y_arr) > 0:
-                #         xs = t_arr[-len(y_arr):]  # align right
-                #         time_lines[ch].set_data(xs, y_arr)
                 for ch in range(num_channels):
                     y_arr = np.array(data_buffers[ch])
-                    safe_set_line_data(time_lines[ch], t_arr, y_arr)
-
+                    if len(y_arr) > 0:
+                        xs = t_arr[-len(y_arr):]  # align right
+                        time_lines[ch].set_data(xs, y_arr)
                 # update sliding x-limits
                 if len(time_buffer):
                     last_t = time_buffer[-1]

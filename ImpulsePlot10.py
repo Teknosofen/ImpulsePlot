@@ -6,7 +6,7 @@ from datetime import datetime
 import time
 
 # === CONFIG ===
-PORT = 'COM4'            # your COM port
+PORT = 'COM7'            # your COM port
 BAUDRATE = 115200
 SAMPLE_RATE = 500        # Hz
 WINDOW_SECONDS = 4

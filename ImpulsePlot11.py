@@ -13,7 +13,7 @@ from datetime import datetime
 import time
 
 # === CONFIG ===
-PORT = 'COM4'
+PORT = 'COM7'
 BAUDRATE = 115200
 SAMPLE_RATE = 500
 WINDOW_SECONDS = 4
