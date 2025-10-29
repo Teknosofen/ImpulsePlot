@@ -21,9 +21,9 @@ import time
 # ----------------------------
 # === User-configurable top ===
 # ----------------------------
-PORT = 'COM6'               # serial port
+PORT = 'COM7'               # serial port
 BAUDRATE = 115200
-SAMPLE_RATE = 500           # Hz
+SAMPLE_RATE = 2000           # Hz
 WINDOW_SECONDS = 4          # visible time window in seconds
 MAX_CHANNELS = 15           # accept up to 15 values per line
 BUFFER_SIZE = int(SAMPLE_RATE * WINDOW_SECONDS)  # circular buffer size

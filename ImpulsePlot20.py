@@ -8,6 +8,7 @@ Requires: pyserial, numpy, matplotlib
 """
 
 import serial
+import serial.tools.list_ports
 import threading
 import queue
 import csv
@@ -21,7 +22,7 @@ import time
 # ----------------------------
 # === User-configurable top ===
 # ----------------------------
-PORT = 'COM7'               # serial port
+PORT = None                  # will be selected from available ports
 BAUDRATE = 115200
 SAMPLE_RATE = 2000           # Hz
 WINDOW_SECONDS = 4          # visible time window in seconds
@@ -30,6 +31,7 @@ BUFFER_SIZE = int(SAMPLE_RATE * WINDOW_SECONDS)  # circular buffer size
 FFT_WINDOW_SAMPLES = 1000   # initial FFT window length (samples)
 TRIGGER_THRESHOLD = 2.5     # g, per-channel trigger threshold
 y_range = 2.0               # Y axis +/- range for time plot
+DISPLAY_DECIMATION = 4      # show every Nth point (1=all, 2=every 2nd, 4=every 4th, etc.)
 
 # ----------------------------
 # === Internal run-time state
@@ -41,6 +43,9 @@ fft_enabled = False
 fft_window_type = 'hann'           # 'hann'|'hamming'|'blackman'|'rect'
 fft_span = SAMPLE_RATE / 2        # displayed frequency span (Hz)
 start_time = datetime.now()
+serial_connected = False           # tracks if serial connection is active
+data_flowing = False               # tracks if valid data is being received
+last_data_time = None              # timestamp of last received data
 
 # amplitude display mode: 'linear' or 'dB'; default linear
 amplitude_mode = 'linear'
@@ -60,6 +65,7 @@ channel_names = []
 data_buffers = []               # list of deques (one per channel)
 time_buffer = deque(maxlen=BUFFER_SIZE)
 arrival_times = deque(maxlen=BUFFER_SIZE)
+first_sample_time = None        # absolute timestamp of first sample (never changes)
 
 # FFT selection state: channels included in FFT plotting (0-based)
 # Keys 1..9 and 0 map to CH1..CH10
@@ -73,6 +79,53 @@ cmap = plt.get_cmap('tab20')
 channel_colors = [cmap(i) for i in range(20)]
 
 # ----------------------------
+# === Serial port selection ===
+# ----------------------------
+def select_serial_port():
+    """
+    Display available serial ports and let user select one.
+    Returns the selected port name or None if cancelled.
+    """
+    ports = serial.tools.list_ports.comports()
+    
+    if not ports:
+        print("❌ No serial ports found!")
+        return None
+    
+    print("\n" + "="*60)
+    print("Available Serial Ports:")
+    print("="*60)
+    for i, port in enumerate(ports, 1):
+        print(f"{i}. {port.device}")
+        print(f"   Description: {port.description}")
+        print(f"   Manufacturer: {port.manufacturer or 'N/A'}")
+        print("-"*60)
+    
+    while True:
+        try:
+            choice = input(f"\nSelect port (1-{len(ports)}) or 'q' to quit: ").strip().lower()
+            if choice == 'q':
+                return None
+            idx = int(choice) - 1
+            if 0 <= idx < len(ports):
+                selected = ports[idx].device
+                print(f"✓ Selected: {selected}")
+                return selected
+            else:
+                print(f"Please enter a number between 1 and {len(ports)}")
+        except ValueError:
+            print("Invalid input. Please enter a number or 'q'")
+        except KeyboardInterrupt:
+            print("\n❌ Cancelled")
+            return None
+
+# Select serial port before starting
+PORT = select_serial_port()
+if PORT is None:
+    print("No port selected. Exiting.")
+    exit(0)
+
+# ----------------------------
 # === Serial reader thread ===
 # ----------------------------
 def serial_reader():
@@ -80,10 +133,15 @@ def serial_reader():
     Background thread that reads lines from serial port, parses up to MAX_CHANNELS
     floats (tab-separated), and puts tuples into data_queue.
     """
+    global serial_connected, data_flowing, last_data_time
+    
     try:
         ser = serial.Serial(PORT, BAUDRATE, timeout=0.01)
         ser.reset_input_buffer()
-        logging.info(f"Serial connected to {PORT} @ {BAUDRATE}")
+        serial_connected = True
+        logging.info(f"✓ Serial connected to {PORT} @ {BAUDRATE}")
+        print(f"✓ Serial connected to {PORT} @ {BAUDRATE}")
+        
         while True:
             raw = ser.readline().decode('ascii', errors='ignore').strip()
             if not raw:
@@ -99,11 +157,15 @@ def serial_reader():
             if vals:
                 try:
                     data_queue.put(tuple(vals), block=False)
+                    data_flowing = True
+                    last_data_time = time.time()
                 except queue.Full:
                     # if queue is full we drop the sample
                     pass
     except Exception as e:
-        logging.error(f"Serial thread error: {e}")
+        serial_connected = False
+        logging.error(f"❌ Serial thread error: {e}")
+        print(f"❌ Serial connection failed: {e}")
 
 # start serial thread as daemon
 threading.Thread(target=serial_reader, daemon=True).start()
@@ -134,8 +196,19 @@ threading.Thread(target=csv_writer, daemon=True).start()
 # === Plot setup (single figure, 2 subplots) ===
 # ----------------------------
 plt.ion()  # interactive mode
+# Configure matplotlib for better rendering of dense data
+plt.rcParams['path.simplify'] = False
+plt.rcParams['path.simplify_threshold'] = 0.0
+plt.rcParams['agg.path.chunksize'] = 0
+# Use fast rendering that still shows all points
+plt.rcParams['lines.linewidth'] = 0.75
+plt.rcParams['lines.antialiased'] = True
+
 fig, (ax_time, ax_fft) = plt.subplots(2, 1, figsize=(14, 9), gridspec_kw={'height_ratios': [2, 1]})
 fig.suptitle("Multi-channel Oscilloscope")
+
+# Try using blitting for faster updates (may help with rendering)
+ax_time.set_animated(False)
 
 # time plot initial config
 ax_time.set_xlabel('Time (s)')
@@ -183,10 +256,6 @@ def init_channels(n):
     """
     global num_channels, channel_names, data_buffers, time_lines, time_legend, help_overlay
     
-    # Only re-initialize if channel count actually changes (but not on first real data)
-    if num_channels == n and len(data_buffers) == n and time_lines:
-        return
-        
     num_channels = n
     channel_names[:] = [f"CH{i+1}" for i in range(num_channels)]
     data_buffers[:] = [deque(maxlen=BUFFER_SIZE) for _ in range(num_channels)]
@@ -199,7 +268,8 @@ def init_channels(n):
     time_lines.clear()
     for ch in range(num_channels):
         ln, = ax_time.plot([], [], label=channel_names[ch],
-                           color=channel_colors[ch % len(channel_colors)])
+                           color=channel_colors[ch % len(channel_colors)],
+                           linewidth=1.0)
         time_lines.append(ln)
     # clickable legend
     time_legend = ax_time.legend(loc='upper right', fancybox=True, shadow=True)
@@ -281,23 +351,25 @@ def append_sample(vals):
     Initialize channels on first call.
     Also queue a CSV row if logging enabled.
     """
-    global num_channels
-    # Check if we need to initialize or re-initialize channels
-    n_vals = min(len(vals), MAX_CHANNELS)
-    if num_channels == 0 or num_channels != n_vals:
-        # determine channel count from first valid line or if count changed
-        init_channels(n_vals)
+    global num_channels, first_sample_time
+    if num_channels == 0:
+        # determine channel count from first valid line
+        init_channels(min(len(vals), MAX_CHANNELS))
     # append each channel value (pad with 0.0 if incoming had fewer columns)
     for ch in range(num_channels):
         v = vals[ch] if ch < len(vals) else 0.0
         data_buffers[ch].append(v)
-    # append monotonic time based on SAMPLE_RATE
+    
+    # append monotonic time based on SAMPLE_RATE (original working method)
     if not time_buffer:
         t = 0.0
     else:
         t = time_buffer[-1] + 1.0 / SAMPLE_RATE
     time_buffer.append(t)
+    
+    # Store actual arrival time for rate calculation
     arrival_times.append(datetime.now().timestamp())
+    
     # enqueue CSV logging row (only timestamp + all channels) if logging is enabled
     if log_enabled:
         try:
@@ -568,12 +640,28 @@ try:
             # Update time-domain lines if channels are present
             if num_channels > 0:
                 t_arr = np.array(time_buffer)
-                # update each channel's line
+                # update each channel's line with decimation for display
                 for ch in range(num_channels):
-                    y_arr = np.array(data_buffers[ch])
-                    if len(y_arr) > 0:
-                        xs = t_arr[-len(y_arr):]  # align right
-                        time_lines[ch].set_data(xs, y_arr)
+                    if len(data_buffers[ch]) > 0:
+                        y_arr = np.array(data_buffers[ch])
+                        # Use the full time array, not a subset
+                        if len(t_arr) == len(y_arr):
+                            # Apply decimation for smoother rendering
+                            # Take every Nth point for display (but keep all data in buffers)
+                            if DISPLAY_DECIMATION > 1 and len(t_arr) > DISPLAY_DECIMATION:
+                                display_indices = slice(0, len(t_arr), DISPLAY_DECIMATION)
+                                time_lines[ch].set_data(t_arr[display_indices], y_arr[display_indices])
+                            else:
+                                time_lines[ch].set_data(t_arr, y_arr)
+                        else:
+                            # If arrays don't match, align them properly
+                            min_len = min(len(t_arr), len(y_arr))
+                            if DISPLAY_DECIMATION > 1 and min_len > DISPLAY_DECIMATION:
+                                display_indices = slice(0, min_len, DISPLAY_DECIMATION)
+                                time_lines[ch].set_data(t_arr[-min_len:][display_indices], 
+                                                       y_arr[-min_len:][display_indices])
+                            else:
+                                time_lines[ch].set_data(t_arr[-min_len:], y_arr[-min_len:])
                 # update sliding x-limits
                 if len(time_buffer):
                     last_t = time_buffer[-1]
@@ -589,9 +677,26 @@ try:
                 intervals = np.diff(np.array(arrival_times))
                 avg_dt = np.mean(intervals)
                 measured_hz = 1.0 / avg_dt if avg_dt > 0 else 0.0
-                ax_time.set_title(f"Oscilloscope — Δt={avg_dt*1000:.1f} ms ({measured_hz:.1f} Hz)")
+                
+                # Add connection status and buffer info to title
+                status = ""
+                if serial_connected:
+                    if data_flowing:
+                        decim_info = f" | Decim: 1/{DISPLAY_DECIMATION}" if DISPLAY_DECIMATION > 1 else ""
+                        status = f" | ✓ Data flowing | Buf: {len(time_buffer)}/{BUFFER_SIZE}{decim_info}"
+                    else:
+                        status = " | ⚠ Connected, waiting for data"
+                else:
+                    status = " | ❌ Not connected"
+                
+                ax_time.set_title(f"Oscilloscope — Δt={avg_dt*1000:.1f} ms ({measured_hz:.1f} Hz){status}")
             else:
-                ax_time.set_title("Oscilloscope — measuring...")
+                status = ""
+                if serial_connected:
+                    status = " | ⚠ Connected, waiting for data..."
+                else:
+                    status = " | ❌ Not connected"
+                ax_time.set_title(f"Oscilloscope — {PORT}{status}")
 
             # check triggers on latest sample (per-channel)
             check_triggers_for_latest_sample()
